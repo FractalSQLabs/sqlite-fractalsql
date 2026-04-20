@@ -1,0 +1,232 @@
+name: Release sqlite-fractalsql Packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # Pinned so CI is reproducible — bump both in tandem when
+  # rolling the SQLite headers forward.
+  SQLITE_YEAR: "2024"
+  SQLITE_VERSION: "3460000"    # SQLite 3.46.0
+
+permissions:
+  contents: write
+
+jobs:
+  # ------------------------------------------------------------------
+  # Linux: .so + .deb + .rpm + .zip for amd64 and arm64.
+  # ------------------------------------------------------------------
+  build-and-release:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [amd64, arm64]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install Packaging Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ruby ruby-dev build-essential rpm zip
+          sudo gem install --no-document fpm
+
+      - name: Build fractalsql.so for ${{ matrix.architecture }}
+        run: |
+          chmod +x build.sh
+          ./build.sh ${{ matrix.architecture }}
+
+      - name: Build .zip, .deb, and .rpm for ${{ matrix.architecture }}
+        run: |
+          chmod +x scripts/package.sh
+          scripts/package.sh ${{ matrix.architecture }}
+
+      - name: Upload artifacts (per-arch)
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-fractalsql-${{ matrix.architecture }}
+          path: dist/packages/*
+          if-no-files-found: error
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/packages/*
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ------------------------------------------------------------------
+  # Windows: fractalsql.dll + FractalSQL-<version>-<arch>.msi
+  #
+  # Matrix:
+  #   x64   → windows-latest      (AMD64 host, native x64 build)
+  #   x86   → windows-latest      (AMD64 host, cross-compiled 32-bit)
+  #   arm64 → windows-11-arm      (native ARM64 Windows runner)
+  #
+  # x86 cross-build notes
+  #   `ilammy/msvc-dev-cmd@v1 with: arch: x86` activates the 32-bit
+  #   MSVC toolchain on the x64 host. LuaJIT's msvcbuild.bat builds
+  #   a native x86 static lib in that dev-cmd environment. The WXS
+  #   preprocessor picks ProgramFilesFolder (instead of
+  #   ProgramFiles64Folder) when sys.BUILDARCH=="x86", so the MSI
+  #   installs into C:\Program Files (x86)\FractalSQL on 64-bit
+  #   Windows — pairs naturally with the 32-bit sqlite3.exe that
+  #   sqlite.org still ships as sqlite-tools-win32-x86-*.zip.
+  #
+  # On each runner the pipeline chains:
+  #   1. MSVC dev cmd (ilammy/msvc-dev-cmd) matched to matrix.arch
+  #   2. WiX Toolset v3 via chocolatey. WiX is an x64 .NET app; on
+  #      the ARM64 runner it runs under emulation, which is fine —
+  #      candle/light still emit a native ARM64 MSI because we pass
+  #      `-arch arm64` to candle.
+  #   3. LuaJIT 2.1 built from source (msvcbuild.bat static).
+  #   4. SQLite amalgamation download for sqlite3ext.h.
+  #   5. scripts/windows/build.bat     → fractalsql.dll (/MT /GL)
+  #   6. scripts/windows/build-msi.bat → FractalSQL-1.0.0-<arch>.msi
+  #      (candle -arch <MSI_ARCH> flows into $(sys.BUILDARCH) and
+  #       sets <Package Platform="…"/> + the Program Files dir ref)
+  # ------------------------------------------------------------------
+  build-windows-msi:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: x86
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC dev cmd (${{ matrix.arch }})
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
+
+      - name: Install WiX Toolset (provides candle.exe + light.exe)
+        shell: pwsh
+        run: |
+          choco install -y --no-progress wixtoolset
+
+          # On the x64 runner, choco shims candle/light into
+          # C:\ProgramData\chocolatey\bin automatically. On the
+          # windows-11-arm runner it doesn't — the wixtoolset chocó
+          # package only drops files under "Program Files (x86)\WiX
+          # Toolset vX.Y\bin" and we have to put that on PATH
+          # ourselves. Find wherever candle.exe landed and append its
+          # directory to $GITHUB_PATH so subsequent steps pick it up.
+          $wixBin = $null
+          $candidates = @(
+            "C:\Program Files (x86)\WiX Toolset v3.14\bin",
+            "C:\Program Files\WiX Toolset v3.14\bin",
+            "C:\Program Files (x86)\WiX Toolset v3.11\bin"
+          )
+          foreach ($c in $candidates) {
+            if (Test-Path (Join-Path $c "candle.exe")) { $wixBin = $c; break }
+          }
+          if (-not $wixBin) {
+            Write-Host "Searching under Program Files for candle.exe..."
+            $hit = Get-ChildItem -Path "C:\Program Files (x86)", "C:\Program Files" `
+                     -Recurse -Filter "candle.exe" -ErrorAction SilentlyContinue `
+                   | Select-Object -First 1
+            if ($hit) { $wixBin = $hit.DirectoryName }
+          }
+          if (-not $wixBin) {
+            Write-Host "FATAL: candle.exe not found after choco install wixtoolset"
+            exit 1
+          }
+          Write-Host "WiX bin dir: $wixBin"
+          Add-Content -Path $env:GITHUB_PATH -Value $wixBin
+
+      - name: Clone + build static LuaJIT 2.1 with MSVC
+        shell: cmd
+        run: |
+          if not exist deps mkdir deps
+          git clone --depth 1 --branch v2.1 https://github.com/LuaJIT/LuaJIT.git deps\LuaJIT
+          cd deps\LuaJIT\src
+          call msvcbuild.bat static
+          if not exist lua51.lib (
+            echo ==^> LuaJIT static build failed
+            exit /b 1
+          )
+          dir lua51.lib lua.h
+
+      - name: Download SQLite amalgamation for headers
+        shell: pwsh
+        run: |
+          $zipName = "sqlite-amalgamation-${env:SQLITE_VERSION}.zip"
+          $url     = "https://www.sqlite.org/${env:SQLITE_YEAR}/$zipName"
+          New-Item -ItemType Directory -Force -Path deps | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile "deps\sqlite.zip"
+          Expand-Archive -Path "deps\sqlite.zip" -DestinationPath deps -Force
+          Rename-Item -Path "deps\sqlite-amalgamation-${env:SQLITE_VERSION}" `
+                      -NewName "sqlite"
+          Get-ChildItem "deps\sqlite\sqlite3ext.h" | Format-List Name, Length
+
+      - name: Build fractalsql.dll (/MT static CRT, /GL WPO)
+        shell: cmd
+        run: |
+          set LUAJIT_DIR=%CD%\deps\LuaJIT\src
+          set SQLITE_DIR=%CD%\deps\sqlite
+          set OUT_DIR=%CD%\dist\windows
+          if not exist "%OUT_DIR%" mkdir "%OUT_DIR%"
+          call scripts\windows\build.bat
+          if errorlevel 1 exit /b 1
+          dir "%OUT_DIR%\fractalsql.dll"
+
+      - name: Smoke-check fractalsql.dll dependencies (dumpbin)
+        shell: pwsh
+        run: |
+          # cmd.exe's `findstr` returns 1 when it doesn't match, which
+          # GHA treats as a failed step even though that's exactly the
+          # success case for us (no MSVC runtime imports). Doing it in
+          # pwsh keeps the pass/fail semantics explicit.
+          $deps = dumpbin /dependents dist\windows\fractalsql.dll
+          Write-Host ($deps -join "`n")
+          if ($deps -match 'vcruntime|msvcp140|msvcr') {
+              Write-Host '==> FAIL: .dll depends on MSVC redistributable DLLs'
+              exit 1
+          }
+          Write-Host '==> OK: no MSVC redistributable imports'
+
+      - name: Build MSI (candle + light, ${{ matrix.arch }})
+        shell: cmd
+        env:
+          MSI_ARCH: ${{ matrix.arch }}
+        run: |
+          call scripts\windows\build-msi.bat
+          if errorlevel 1 exit /b 1
+          dir dist\windows\*.msi
+
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-fractalsql-windows-msi-${{ matrix.arch }}
+          path: dist/windows/*.msi
+          if-no-files-found: error
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/windows/*.msi
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

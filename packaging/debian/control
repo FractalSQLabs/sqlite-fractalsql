@@ -1,0 +1,39 @@
+Source: sqlite3-fractalsql
+Section: database
+Priority: optional
+Maintainer: FractalSQLabs <ops@fractalsqlabs.io>
+Build-Depends:
+ debhelper-compat (= 13),
+ g++,
+ libsqlite3-dev,
+ pkg-config
+Standards-Version: 4.6.2
+Homepage: https://github.com/FractalSQLabs/sqlite-fractalsql
+
+Package: sqlite3-fractalsql
+Architecture: amd64 arm64
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ libc6 (>= 2.38)
+Recommends:
+ sqlite3
+Description: Stochastic Fractal Search SQLite loadable extension (Community)
+ sqlite3-fractalsql is a SQLite loadable extension exposing a
+ fractal_search(vector, query) scalar function plus fractalsql_edition()
+ and fractalsql_version() helpers, backed by a LuaJIT-compiled
+ Stochastic Fractal Search optimizer.
+ .
+ Community Edition (v1.0.0): Salimi 2014 canonical SFS with Gaussian
+ diffusion and greedy sniper selection.
+ .
+ Zero runtime dependency: LuaJIT, libgcc, and libstdc++ are all
+ statically linked into the extension; the only import is glibc.
+ .
+ After installation, load the extension in any SQLite session:
+ .
+     SELECT load_extension('/usr/local/lib/sqlite3/fractalsql');
+ .
+ Suitable for edge / serverless deployments (Vercel, AWS Lambda),
+ Turso / libSQL, Cloudflare D1 (where extensions are permitted),
+ React Native / Flutter mobile apps, and desktop SQLite usage.

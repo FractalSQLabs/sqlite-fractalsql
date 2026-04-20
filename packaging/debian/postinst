@@ -1,0 +1,43 @@
+#!/bin/sh
+# packaging/debian/postinst
+#
+# Prints a short usage pointer so a new user knows how to load the
+# extension right after `apt install`. fpm wires this up via
+# --after-install; a native debhelper build would put this at
+# debian/sqlite3-fractalsql.postinst.
+
+set -e
+
+case "$1" in
+    configure)
+        cat <<'EOF'
+
+sqlite3-fractalsql Community installed.
+
+Load inside any SQLite session:
+
+    SELECT load_extension('/usr/local/lib/sqlite3/fractalsql');
+
+Or from the CLI:
+
+    sqlite3 mydb.sqlite \
+        -cmd ".load /usr/local/lib/sqlite3/fractalsql" \
+        -cmd "SELECT fractalsql_edition();"        -- 'Community'
+        -cmd "SELECT fractalsql_version();"        -- '1.0.0'
+
+Example top-k query:
+
+    SELECT id
+    FROM my_vectors
+    ORDER BY fractal_search(embedding, :query_vector)
+    LIMIT 10;
+
+For full examples, see /usr/share/doc/sqlite3-fractalsql/load_extension.sql.
+
+EOF
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+esac
+
+exit 0

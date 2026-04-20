@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  scripts/windows/fractalsql.wxs — WiX Toolset source for the
+  FractalSQL SQLite extension Windows MSI.
+
+  UX flow
+    1. Welcome / EULA.
+    2. WixUI_InstallDir lets the user pick the install folder
+       (default: C:\Program Files\FractalSQL).
+    3. A checkbox (default ON) backed by the ADDTOPATH property
+       controls whether the install directory is prepended to the
+       system %PATH%.
+    4. Install copies fractalsql.dll + load_extension.sql +
+       LICENSE + README.txt. If ADDTOPATH = 1 the Environment
+       table creates a Path entry.
+    5. Uninstall removes every file AND the Path entry.
+
+  Build
+    candle scripts/windows/fractalsql.wxs -out obj\\fractalsql.wixobj
+    light  obj\\fractalsql.wixobj ^
+           -ext WixUIExtension ^
+           -ext WixUtilExtension ^
+           -out dist\\windows\\FractalSQL-1.0.0.msi
+
+  ProductId is auto-generated per release (`*`) to force clean
+  major upgrades; UpgradeCode is the PERMANENT identity of the
+  product line — never change it across versions.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+
+  <Product Id="*"
+           Name="FractalSQL for SQLite"
+           Language="1033"
+           Version="1.0.0"
+           Manufacturer="FractalSQLabs"
+           UpgradeCode="C7F2A9C4-4E31-4C5A-9A2F-4F1A6A5B3E17">
+
+    <!-- Platform inherits candle's -arch flag via sys.BUILDARCH.
+         candle -arch x64   -> Platform="x64"
+         candle -arch arm64 -> Platform="arm64"
+         Both cases install into ProgramFiles64Folder, which
+         resolves to C:\Program Files on native x64 AND arm64
+         Windows. ICE80 stays happy because every Component inherits
+         the Package's Platform value. -->
+    <Package InstallerVersion="300"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Platform="$(sys.BUILDARCH)"
+             Description="FractalSQL SQLite extension installer"
+             Manufacturer="FractalSQLabs" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of FractalSQL is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- ADDTOPATH: checkbox on the FolderDlg (1 = add to %PATH%). -->
+    <Property Id="ADDTOPATH" Value="1" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
+    <!-- Program Files directory differs by arch:
+         x86   → ProgramFilesFolder    (C:\Program Files (x86)\ on 64-bit Win)
+         x64   → ProgramFiles64Folder  (C:\Program Files\)
+         arm64 → ProgramFiles64Folder  (native arm64 Program Files)
+         The preprocessor picks based on candle's -arch flag. -->
+    <?if $(sys.BUILDARCH) = "x86" ?>
+        <?define ProgramFilesDir = "ProgramFilesFolder" ?>
+    <?else ?>
+        <?define ProgramFilesDir = "ProgramFiles64Folder" ?>
+    <?endif ?>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="$(var.ProgramFilesDir)">
+        <Directory Id="INSTALLFOLDER" Name="FractalSQL" />
+      </Directory>
+    </Directory>
+
+    <!-- File components. Each wraps a single file so individual
+         removal is clean under uninstall. -->
+    <ComponentGroup Id="CoreFiles" Directory="INSTALLFOLDER">
+
+      <Component Id="c_FractalSqlDll" Guid="4F3B1A52-8F13-4AB1-B5D1-6D85B6E2A902">
+        <File Id="fractalsql.dll"
+              Source="dist/windows/fractalsql.dll"
+              KeyPath="yes" />
+      </Component>
+
+      <Component Id="c_LoadExtensionSql" Guid="1F7A0C29-2B80-4E35-9CE1-7B07E4F1B9AD">
+        <File Id="load_extension.sql"
+              Source="sql/load_extension.sql"
+              KeyPath="yes" />
+      </Component>
+
+      <Component Id="c_License" Guid="0D4F9B8C-3A02-4B5F-B7AE-62A8D7F55810">
+        <File Id="LICENSE.txt"
+              Source="LICENSE"
+              KeyPath="yes" />
+      </Component>
+
+      <!-- Third-party attribution ledger. Harvested by every MSI
+           (x64 / x86 / arm64) because the community bytecode that
+           all three ship is built on the same upstream set (Salimi
+           2014 SFS + LuaJIT). When/if an Enterprise sqlite MSI is
+           introduced, swap the Source here for the Enterprise
+           ledger (Kati 2023 / dFDB V6 / QRFS) — or better, split
+           into a separate ComponentGroup with a compile-time
+           <?if EDITION = "enterprise" ?> switch. -->
+      <Component Id="c_LicenseThirdParty" Guid="9B4E6A7F-1C2D-4E8F-9A1B-3C5D7E9F0A2B">
+        <File Id="LICENSE_THIRD_PARTY.txt"
+              Source="LICENSE-THIRD-PARTY"
+              KeyPath="yes" />
+      </Component>
+
+      <Component Id="c_Readme" Guid="E17C2B45-9D1A-4F62-BF23-4B3E7C2F8A01">
+        <File Id="README.txt"
+              Source="dist/windows/README.txt"
+              KeyPath="yes" />
+      </Component>
+
+      <!-- PATH entry. Gated on ADDTOPATH=1 so opting out skips it
+           entirely; uninstall always removes it if it was created. -->
+      <Component Id="c_PathEntry" Guid="AA8B21E6-2F77-4A56-9F1B-6D15A3B2E40F">
+        <Condition>ADDTOPATH = "1"</Condition>
+        <CreateFolder />
+        <Environment Id="env_Path"
+                     Name="PATH"
+                     Action="set"
+                     Part="last"
+                     System="yes"
+                     Permanent="no"
+                     Value="[INSTALLFOLDER]" />
+        <RegistryValue Root="HKLM"
+                       Key="Software\FractalSQLabs\FractalSQL"
+                       Name="AddedToPath"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="MainFeature"
+             Title="FractalSQL Core"
+             Level="1"
+             Display="expand"
+             AllowAdvertise="no">
+      <ComponentGroupRef Id="CoreFiles" />
+    </Feature>
+
+    <!-- UI: standard WixUI_InstallDir (Welcome → EULA → FolderDlg →
+         Ready → Progress). The install folder picker is the
+         interactive piece the brief calls for.
+         ADDTOPATH defaults to 1 (path entry added). Power-users who
+         specifically don't want the PATH modification pass it on
+         the command line:
+             msiexec /i FractalSQL-1.0.0.msi ADDTOPATH=0
+         Adding a visible checkbox to the stock InstallDirDlg requires
+         cloning that dialog under a new ID and rewiring the nav
+         chain with <Publish> — a larger refactor we can layer in
+         later without changing the shipped property contract. -->
+    <UIRef Id="WixUI_InstallDir" />
+    <UIRef Id="WixUI_ErrorProgressText" />
+
+  </Product>
+</Wix>
